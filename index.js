@@ -3,6 +3,9 @@ const fs = require('fs');
 require('dotenv').config();
 const axios = require("axios");
 const cron = require('node-cron');
+const { technos } = require('./news/technos');
+const handleGuildMemberAdd = require('./members/events/onMemberAdd');
+const { parseNewsCommand, getNewsCommandHelp } = require('./news/commands/newsCommand');
 
 const client = new Client({
   intents: [
@@ -16,56 +19,34 @@ const client = new Client({
   ]
 });
 
-// Configuration des technologies
-const technologies = [
-    {
-        name: 'Symfony',
-        query: 'Symfony OR "Symfony framework"',
-        color: 0x000000,
-        emoji: '🎵',
-        thumbnail: 'https://symfony.com/images/opengraph/symfony.png'
-    },
-    {
-        name: 'Next.js',
-        query: 'Next.js OR Nextjs OR "Next framework"',
-        color: 0x000000,
-        emoji: '▲',
-        thumbnail: 'https://assets.vercel.com/image/upload/v1662130559/nextjs/Icon_light_background.png'
-    },
-    {
-        name: 'Tailwind CSS',
-        query: 'Tailwind CSS OR TailwindCSS',
-        color: 0x06B6D4,
-        emoji: '💨',
-        thumbnail: 'https://tailwindcss.com/_next/static/media/tailwindcss-mark.3c5441fc7a190fb1800d4a5c7f07ba4b1345a9c8.svg'
-    },
-    {
-        name: 'React',
-        query: 'React.js OR ReactJS OR "React framework"',
-        color: 0x61DAFB,
-        emoji: '⚛️',
-        thumbnail: 'https://upload.wikimedia.org/wikipedia/commons/a/a7/React-icon.svg'
-    },
-    {
-        name: 'React Native',
-        query: '"React Native" OR ReactNative',
-        color: 0x61DAFB,
-        emoji: '📱',
-        thumbnail: 'https://reactnative.dev/img/header_logo.svg'
-    }
-];
 
-async function sendTechNews(channel, tech) {
+client.on('guildMemberAdd', handleGuildMemberAdd);
+
+
+client.on('messageCreate', message => {
+    if(message.author.bot) return;
+
+    if(message.channelId === process.env.CHANNEL_NEWS && message.content === '/news_last_7_days') {
+        message.reply('News des 7 derniers jours :');
+    }
+});
+
+async function sendTechNews(channel, tech, fromDate = null, toDate = null) {
     try {
-        // const today = new Date();
-        // today.setHours(0, 0, 0, 0);
-        const last7Days = new Date();
-        last7Days.setDate(last7Days.getDate() - 7);
+        // Default to last 7 days if no dates provided
+        if (!fromDate) {
+            fromDate = new Date();
+            fromDate.setDate(fromDate.getDate() - 7);
+        }
+        if (!toDate) {
+            toDate = new Date();
+        }
 
         const response = await axios.get('https://newsapi.org/v2/everything', {
             params: {
                 q: tech.query,
-                from: last7Days.toISOString(), // Permet de retourner les articles des x derniers jours ou heures selon ce qui est mis.
+                from: fromDate.toISOString(), // Start date for articles
+                to: toDate.toISOString(), // End date for articles
                 language: 'en',
                 sortBy: 'publishedAt',
                 pageSize: 5,
@@ -111,15 +92,6 @@ async function sendTechNews(channel, tech) {
     }
 }
 
-// Souhaitons la bienvenue à un nouvel utilisateur.
-client.on('guildMemberAdd', (member) => {
-  console.log(`${member.user.tag} a rejoint ${member.guild.name}. Souhaitez lui la bienvenue !!`);
-  const channel = member.guild.systemChannel;
-  if (channel) {
-    channel.send(`Bienvenue ${member} sur le serveur ! 🎉`);
-  }
-});
-
 // Cron des news sur les technos.
 client.on('clientReady', () => {
     console.log(`Bot connecté en tant que ${client.user.tag}`);
@@ -150,7 +122,7 @@ client.on('clientReady', () => {
             let totalArticles = 0;
 
             // Parcourir toutes les technologies
-            for (const tech of technologies) {
+            for (const tech of technos) {
                 const count = await sendTechNews(channel, tech);
                 totalArticles += count;
                 
@@ -181,10 +153,80 @@ client.on('clientReady', () => {
 // Commandes utiles
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
-    
+
+    // !news command with date range support
+    if (message.content.startsWith('!news')) {
+        const parsedArgs = parseNewsCommand(message.content);
+
+        // Show help if requested or if --techno is missing
+        if (message.content.includes('--help') || message.content.includes('-h') ||
+            (parsedArgs && parsedArgs.error === 'required')) {
+            message.reply(getNewsCommandHelp(technos));
+            return;
+        }
+
+        // Handle other parsing errors
+        if (parsedArgs && parsedArgs.error) {
+            message.reply(parsedArgs.error);
+            return;
+        }
+
+        if (!parsedArgs) {
+            message.reply('❌ Invalid command format. Use `!news --help` for usage information.');
+            return;
+        }
+
+        const { from, to, tech } = parsedArgs;
+        const channel = message.channel;
+
+        // tech should always be present due to validation, but double-check
+        if (!tech) {
+            message.reply(getNewsCommandHelp(technos));
+            return;
+        }
+
+        // Filter technologies - tech is now required so it will always be present
+        const techsToQuery = technos.filter(t =>
+            t.name.toLowerCase() === tech.toLowerCase()
+        );
+
+        if (techsToQuery.length === 0) {
+            message.reply(`❌ Technology "${tech}" not found.\n\n${getNewsCommandHelp(technos)}`);
+            return;
+        }
+
+        // Send initial message
+        message.reply(`📰 Fetching news from **${from.toLocaleDateString('fr-FR')}** to **${to.toLocaleDateString('fr-FR')}**...`);
+
+        let totalArticles = 0;
+
+        // Header message
+        await channel.send(`
+╔═══════════════════════════════════════╗
+║      📰 **ACTUALITÉS TECH** 📰        ║
+║   ${from.toLocaleDateString('fr-FR')} → ${to.toLocaleDateString('fr-FR')}   ║
+╚═══════════════════════════════════════╝
+        `);
+
+        // Fetch news for each technology
+        for (const techItem of techsToQuery) {
+            const count = await sendTechNews(channel, techItem, from, to);
+            totalArticles += count;
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        // Summary message
+        await channel.send(`
+╔═══════════════════════════════════════╗
+║  ✅ **Rapport terminé**                ║
+║  📊 Total : ${totalArticles} article(s)          ║
+╚═══════════════════════════════════════╝
+        `);
+    }
+
     if (message.content === '!test-news') {
         message.reply('🧪 Test des actualités en cours...');
-        
+
         const channel = message.channel;
         let totalArticles = 0;
 
@@ -196,7 +238,7 @@ client.on('messageCreate', async message => {
 ╚═══════════════════════════════════════╝
         `);
 
-        for (const tech of technologies) {
+        for (const tech of technos) {
             const count = await sendTechNews(channel, tech);
             totalArticles += count;
             await new Promise(resolve => setTimeout(resolve, 2000));
@@ -206,7 +248,7 @@ client.on('messageCreate', async message => {
     }
 
     if (message.content === '!tech-list') {
-        const techList = technologies.map(t => `${t.emoji} **${t.name}**`).join('\n');
+        const techList = technos.map(t => `${t.emoji} **${t.name}**`).join('\n');
         message.reply(`**Technologies suivies :**\n${techList}`);
     }
 });
